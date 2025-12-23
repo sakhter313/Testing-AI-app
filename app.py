@@ -22,28 +22,28 @@ litellm.request_timeout = 180
 
 st.set_page_config(page_title="Giskard LLM Scanner", layout="wide")
 
-# OpenAI key required for embeddings
+# OpenAI key required for embeddings (many Giskard detectors need it)
 if "OPENAI_API_KEY" in st.secrets:
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
-st.sidebar.header("🔑 OpenAI API Key (REQUIRED for embeddings & reliable scan)")
+st.sidebar.header("🔑 OpenAI API Key (REQUIRED)")
 api_key = st.sidebar.text_input("Enter your OpenAI key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
 if api_key:
     os.environ["OPENAI_API_KEY"] = api_key.strip()
 else:
-    st.sidebar.error("OpenAI API key is REQUIRED!")
+    st.sidebar.error("OpenAI API key is REQUIRED for embeddings!")
     st.stop()
 
 st.sidebar.header("⚙️ Settings")
-use_vulnerable_mode = st.sidebar.checkbox("Enable Vulnerable Mode (Shows more issues with jailbreak data)", value=False)
+use_vulnerable_mode = st.sidebar.checkbox("Enable Vulnerable Mode (Free Mistral-7B – shows more issues on jailbreaks)", value=True)
 sample_size = st.sidebar.number_input("HF Dataset Sample Size", min_value=5, max_value=20, value=10)
 
 if use_vulnerable_mode:
-    model_name = "mistralai/mistral-7b-instruct:free"  # Correct free model on OpenRouter (no extra key needed)
-    st.sidebar.warning("🟡 Vulnerable Mode: Uses free Mistral-7B (less censored) – good for detecting issues, but may have rate limits.")
+    model_name = "openrouter/mistralai/mistral-7b-instruct:free"  # Correct format for free Mistral on OpenRouter
+    st.sidebar.warning("🟡 Vulnerable Mode: Free Mistral-7B (less censored) – great for detecting vulnerabilities, but limited to ~20 req/min.")
 else:
-    model_name = "gpt-4o-mini"  # Fast, reliable, safe
-    st.sidebar.success("🟢 Safe Mode: Very reliable, usually detects 0 issues on normal data.")
+    model_name = "gpt-4o-mini"  # Reliable & safe
+    st.sidebar.success("🟢 Safe Mode: Fast and reliable.")
 
 # Set Giskard models
 try:
@@ -56,9 +56,9 @@ except Exception as e:
 st.title("🛡️ Giskard LLM Vulnerability Scanner")
 
 st.markdown("""
-**Safe Mode** (default): GPT-4o-mini – fast and usually shows 0 vulnerabilities.
+**Safe Mode** (unchecked): GPT-4o-mini – very safe, fast, usually 0 issues.
 
-**Vulnerable Mode**: Free Mistral-7B (less censored) – better at triggering jailbreak/harm/bias issues on adversarial data.
+**Vulnerable Mode** (checked): Free Mistral-7B via OpenRouter – less censored, triggers more vulnerabilities on adversarial/jailbreak data.
 """)
 
 # Session state
@@ -121,7 +121,7 @@ if st.session_state.df is not None and not st.session_state.df.empty:
     st.session_state.prompt_col = prompt_col
 
     if st.button("🚀 Run Giskard Scan", type="primary"):
-        with st.spinner("Processing prompts & running scan (5-20 mins)..."):
+        with st.spinner("Generating responses & scanning (5-30 mins, slower in Vulnerable Mode)..."):
             try:
                 df[prompt_col] = df[prompt_col].apply(normalize_text)
 
@@ -134,9 +134,9 @@ if st.session_state.df is not None and not st.session_state.df.empty:
                     status = st.empty()
                     for i, p in enumerate(prompts):
                         if not p.strip():
-                            responses.append("[Empty]")
+                            responses.append("[Empty prompt]")
                             continue
-                        status.text(f"Generating response {i+1}/{len(prompts)}...")
+                        status.text(f"Processing {i+1}/{len(prompts)}...")
                         try:
                             resp = litellm.completion(
                                 model=model_name,
@@ -156,11 +156,11 @@ if st.session_state.df is not None and not st.session_state.df.empty:
                     model=predict,
                     model_type="text_generation",
                     name="Test LLM",
-                    description="Scanned for safety vulnerabilities",
+                    description="Scanned for safety issues",
                     feature_names=[prompt_col]
                 )
 
-                st.info("Running Giskard detectors...")
+                st.info("Running Giskard scan...")
                 scan_results = scan(giskard_model, giskard_dataset)
 
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp:
@@ -184,12 +184,12 @@ if st.session_state.df is not None and not st.session_state.df.empty:
                         status = "⚠️ DETECTED" if score > thresh else "✅ Safe"
                         st.write(f"**{issue['name']}**: {status} (Score: {score:.2f})")
                 else:
-                    st.success("No vulnerabilities detected! Try Vulnerable Mode + jailbreak dataset.")
+                    st.success("No major issues! Try Vulnerable Mode + jailbreak data.")
 
             except Exception as e:
                 st.error(f"Scan failed: {e}")
                 st.exception(e)
 else:
-    st.info("Load data to start scanning.")
+    st.info("Load data to start.")
 
-st.caption("For best demo of vulnerabilities: Enable Vulnerable Mode + use HF jailbreak dataset.")
+st.caption("Best for vulnerabilities: Vulnerable Mode + HF jailbreak dataset. Free Mistral has rate limits (~20/min).")
