@@ -1,6 +1,7 @@
 streamlit
 litellm
-giskard
+giskard==2.18.0
 datasets
 pandas
 openpyxl
+sentence-transformers
