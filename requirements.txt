@@ -6,4 +6,5 @@ datasets
 openpyxl
 numpy
 langchain
-langchain-community
+langchain-core
+langchain-litellm   # ← this is the important new one
