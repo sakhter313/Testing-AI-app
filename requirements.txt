@@ -1,7 +1,9 @@
 streamlit
-litellm
-giskard==2.18.0
-datasets
 pandas
+litellm
+giskard[llm]
+datasets
 openpyxl
-sentence-transformers
+numpy
+langchain
+langchain-community
