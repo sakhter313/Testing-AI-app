@@ -1,0 +1,6 @@
+streamlit==1.38.0
+litellm==1.48.2
+giskard==2024.11.4
+datasets==2.21.0
+pandas==2.2.3
+openpyxl==3.1.5
