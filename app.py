@@ -34,7 +34,9 @@ giskard_api_key = st.sidebar.text_input(
     help="Used for Giskard detectors (hallucinations, bias, etc.). Keep separate from tested model."
 )
 
+openai_key = None
 if giskard_api_key:
+    openai_key = giskard_api_key
     os.environ["OPENAI_API_KEY"] = giskard_api_key
     set_llm_model("gpt-4o")  # Or "gpt-4o-mini" for faster/cheaper scans
     set_embedding_model("text-embedding-3-small")
@@ -47,6 +49,7 @@ st.sidebar.subheader("Tested LLM Model")
 provider = st.sidebar.selectbox(
     "Provider",
     ["openai", "anthropic", "groq", "azure_openai", "together"],
+    index=0,
     help="Select provider for the LLM you want to test."
 )
 test_api_key = st.sidebar.text_input(
@@ -55,8 +58,16 @@ test_api_key = st.sidebar.text_input(
     value=os.getenv(f"{provider.upper()}_API_KEY", ""),
     help="API key for the selected provider."
 )
+
 if test_api_key:
-    os.environ[f"{provider.upper()}_API_KEY"] = test_api_key
+    if provider == "openai":
+        # For OpenAI, use the provided test key, overwriting for both model and Giskard (ensure it's valid)
+        os.environ["OPENAI_API_KEY"] = test_api_key
+        if openai_key and test_api_key != openai_key:
+            st.sidebar.warning("🛑 Tested OpenAI key differs from Giskard key. Using tested key for both. Ensure it's valid!")
+        openai_key = test_api_key
+    else:
+        os.environ[f"{provider.upper()}_API_KEY"] = test_api_key
     st.sidebar.success("✅ Tested model API key set")
 
 default_model = {
@@ -126,6 +137,9 @@ elif data_source == "Upload CSV/Excel":
                 df = pd.read_csv(uploaded_file)
             else:
                 df = pd.read_excel(uploaded_file)
+            if len(df) == 0:
+                st.error("❌ Empty file uploaded.")
+                st.stop()
             st.session_state.df = df
             st.dataframe(df.head(10), use_container_width=True)
         except Exception as e:
@@ -160,50 +174,65 @@ elif data_source == "Hugging Face Dataset":
                 st.stop()
 
 # Use session state if available
-if st.session_state.df is not None and st.session_state.input_col is not None:
+if st.session_state.df is not None:
     df = st.session_state.df
+    if st.session_state.input_col is None:
+        # Fallback for upload without prior col select
+        if len(df.columns) > 0:
+            st.session_state.input_col = df.columns[0]
     input_col = st.session_state.input_col
 else:
     st.warning("👆 Select and load a dataset first.")
     st.stop()
 
+if input_col not in df.columns:
+    st.error(f"❌ Input column '{input_col}' not found in dataset.")
+    st.stop()
+
 # Select input column if not fixed (for uploads/HF)
 if data_source in ["Upload CSV/Excel", "Hugging Face Dataset"]:
-    input_col = st.selectbox(
+    selected_input_col = st.selectbox(
         "Select input column for text/prompts",
         options=df.columns.tolist(),
-        index=df.columns.get_loc(input_col) if input_col in df.columns else 0
+        index=df.columns.get_loc(input_col)
     )
-    st.session_state.input_col = input_col
+    if selected_input_col != input_col:
+        input_col = selected_input_col
+        st.session_state.input_col = input_col
 
-# Prepare Giskard Dataset
+# Prepare Giskard Dataset - only include the input column to avoid issues with complex columns
 @st.cache_data
 def prepare_dataset(_df, _input_col):
+    input_df = _df[[_input_col]].reset_index(drop=True)
     return Dataset(
-        df=_df,
+        df=input_df,
         name="LLM Test Dataset",
         column_types={_input_col: "text"}
     )
 
 giskard_dataset = prepare_dataset(df, input_col)
 
-# Model prediction function
+# Model prediction function - fixed messages with separate system and user
 @st.cache_data
-def predict_llm(_question: str, _system_prompt: str, _model: str) -> str:
-    user_prompt = f"{_system_prompt}\n\nUser: {_question}"
+def predict_llm(_question: str, _system_prompt: str, _model: str, _provider: str) -> str:
     try:
+        messages = [
+            {"role": "system", "content": _system_prompt},
+            {"role": "user", "content": _question}
+        ]
         response = litellm.completion(
             model=_model,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=messages,
             temperature=0.2,
             max_tokens=300
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"Error: {str(e)}"
+        st.error(f"Prediction error: {str(e)}")
+        return f"Error generating response: {str(e)}"
 
 def model_predict(_df: pd.DataFrame) -> list:
-    return [predict_llm(q, system_prompt, selected_model) for q in _df[input_col]]
+    return [predict_llm(q, system_prompt, selected_model, provider) for q in _df[input_col]]
 
 # Create Giskard Model
 giskard_model = Model(
@@ -220,7 +249,7 @@ if st.button("🚀 Launch Giskard Scan", type="primary", help="Detects hallucina
     if not giskard_api_key:
         st.error("❌ OpenAI API Key required for Giskard scanning!")
         st.stop()
-    if not test_api_key:
+    if not test_api_key and provider != "openai":
         st.error("❌ API Key required for the tested model!")
         st.stop()
 
@@ -229,10 +258,11 @@ if st.button("🚀 Launch Giskard Scan", type="primary", help="Detects hallucina
             # Execute scan
             scan_results = scan(giskard_model, giskard_dataset)
 
-            # Generate HTML report
+            # Generate HTML report in temp file
             with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as tmp_file:
                 scan_results.to_html(tmp_file.name)
                 html_path = tmp_file.name
+            tmp_file.close()  # Close the file handle
 
             # Read HTML content
             with open(html_path, "r", encoding="utf-8") as f:
@@ -247,38 +277,36 @@ if st.button("🚀 Launch Giskard Scan", type="primary", help="Detects hallucina
             # Download buttons
             col1, col2 = st.columns(2)
             with col1:
-                # Re-generate for download
+                # Re-generate HTML for download
                 with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as tmp_html:
                     scan_results.to_html(tmp_html.name)
-                with open(tmp_html.name, "rb") as f:
+                    html_path = tmp_html.name
+                tmp_html.close()
+                with open(html_path, "rb") as f:
                     st.download_button(
                         label="📥 Download HTML Report",
-                        data=f,
+                        data=f.read(),
                         file_name=f"giskard_{provider}_{selected_model}_report.html",
                         mime="text/html"
                     )
-                os.unlink(tmp_html.name)
+                os.unlink(html_path)
 
             with col2:
-                # Generate test suite
+                # Generate and zip test suite
                 test_suite = scan_results.generate_test_suite(f"{provider}_{selected_model}_Vuln_Suite")
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     suite_path = os.path.join(tmp_dir, "test_suite")
                     test_suite.save(suite_path)
-                    zip_buffer = io.BytesIO()
-                    shutil.make_archive(base_name="test_suite", format="zip", root_dir=tmp_dir, base_dir="test_suite")
-                    # Note: shutil.make_archive writes to file, so use temp file for zip
-                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp_zip:
-                        shutil.make_archive(tmp_zip.name.replace(".zip", ""), format="zip", root_dir=tmp_dir)
-                        zip_path = tmp_zip.name.replace(".zip", "") + ".zip"
-                        with open(zip_path, "rb") as zip_f:
-                            st.download_button(
-                                label="💾 Download Test Suite (ZIP)",
-                                data=zip_f,
-                                file_name=f"{provider}_{selected_model}_test_suite.zip",
-                                mime="application/zip"
-                            )
-                    os.unlink(zip_path)
+                    zip_filename = f"{provider}_{selected_model}_test_suite.zip"
+                    zip_path = os.path.join(tmp_dir, zip_filename)
+                    shutil.make_archive(zip_path[:-4], "zip", tmp_dir, "test_suite")
+                    with open(zip_path, "rb") as zip_f:
+                        st.download_button(
+                            label="💾 Download Test Suite (ZIP)",
+                            data=zip_f.read(),
+                            file_name=zip_filename,
+                            mime="application/zip"
+                        )
 
         except Exception as e:
             st.error("❌ Scan failed!")
